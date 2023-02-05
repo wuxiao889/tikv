@@ -216,6 +216,11 @@ func TestRawScan1(t *testing.T) {
 	Set(s, cf, []byte{4}, []byte{233, 4})
 	Set(s, cf, []byte{5}, []byte{233, 5})
 
+	iter, _ := Iter(s, cf)
+	defer iter.Close()
+	iter.Seek([]byte{1})
+	assert.True(t, iter.Valid())
+
 	req := &kvrpcpb.RawScanRequest{
 		StartKey: []byte{1},
 		Limit:    3,

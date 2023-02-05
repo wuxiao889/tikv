@@ -49,6 +49,7 @@ func TestEngineUtil(t *testing.T) {
 	defaultIter := NewCFIterator(CfDefault, txn)
 	defaultIter.Seek([]byte("a"))
 	item := defaultIter.Item()
+	require.True(t, defaultIter.Valid())
 	require.True(t, bytes.Equal(item.Key(), []byte("a")))
 	val, _ = item.Value()
 	require.True(t, bytes.Equal(val, []byte("a1")))

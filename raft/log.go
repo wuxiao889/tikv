@@ -14,13 +14,16 @@
 
 package raft
 
-import pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
+import (
+	"github.com/pingcap-incubator/tinykv/log"
+	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
+)
 
 // RaftLog manage the log entries, its struct look like:
 //
-//  snapshot/first.....applied....committed....stabled.....last
-//  --------|------------------------------------------------|
-//                            log entries
+//	snapshot/first.....applied....committed....stabled.....last
+//	--------|------------------------------------------------|
+//	                          log entries
 //
 // for simplify the RaftLog implement should manage all log entries
 // that not truncated
@@ -40,23 +43,35 @@ type RaftLog struct {
 	// log entries with index <= stabled are persisted to storage.
 	// It is used to record the logs that are not persisted by storage yet.
 	// Everytime handling `Ready`, the unstabled logs will be included.
-	stabled uint64
+	// stabled uint64
 
 	// all entries that have not yet compact.
 	entries []pb.Entry
 
 	// the incoming unstable snapshot, if any.
 	// (Used in 2C)
-	pendingSnapshot *pb.Snapshot
+	// pendingSnapshot *pb.Snapshot
 
 	// Your Data Here (2A).
+	unstable unstable
 }
 
 // newLog returns log using the given storage. It recovers the log
 // to the state that it just commits and applies the latest snapshot.
 func newLog(storage Storage) *RaftLog {
 	// Your Code Here (2A).
-	return nil
+	if storage == nil {
+		log.Panic("storage must not be nil")
+	}
+	log := &RaftLog{
+		storage: storage,
+	}
+	firstIndex, _ := storage.FirstIndex()
+	lastIndex, _ := storage.LastIndex()
+	log.unstable.offset = lastIndex + 1
+	log.committed = firstIndex - 1
+	log.applied = firstIndex - 1
+	return log
 }
 
 // We need to compact the log entries in some point of time like
@@ -77,23 +92,120 @@ func (l *RaftLog) allEntries() []pb.Entry {
 // unstableEntries return all the unstable entries
 func (l *RaftLog) unstableEntries() []pb.Entry {
 	// Your Code Here (2A).
+	if len(l.unstable.entries) == 0 {
+		return nil
+	}
+	return l.unstable.entries
+}
+
+func (l *RaftLog) slice(lo, hi uint64) ([]pb.Entry, error) {
+	err := l.mustCheckOutOfBounds(lo, hi)
+	if err != nil {
+		return nil, err
+	}
+	if lo == hi {
+		return nil, nil
+	}
+	var ents []pb.Entry
+	if lo < l.unstable.offset {
+		storedEnts, err := l.storage.Entries(lo, min(hi, l.unstable.offset))
+		if err != ErrCompacted {
+			return nil, err
+		} else if err == ErrUnavailable {
+			log.Panicf("entries[%d:%d) is unavailable from storage", lo, min(hi, l.unstable.offset))
+		} else if err != nil {
+			panic(err)
+		}
+		if uint64(len(storedEnts)) < min(hi, l.unstable.offset)-lo {
+			return storedEnts, nil
+		}
+		ents = storedEnts
+	}
+	if hi > l.unstable.offset {
+		unstable := l.unstable.slice(max(lo, l.unstable.offset), hi)
+		if len(ents) > 0 {
+			ents = append([]pb.Entry{}, ents...)
+			ents = append(ents, unstable...)
+		} else {
+			ents = unstable
+		}
+	}
+	return ents, nil
+}
+
+func (l *RaftLog) mustCheckOutOfBounds(lo, hi uint64) error {
+	if lo > hi {
+		log.Panicf("invalid slice %d > %d", lo, hi)
+	}
+	fi := l.firstIndex()
+	if lo < fi {
+		return ErrCompacted
+	}
+	la := l.LastIndex() + 1
+	if lo < fi || hi > la {
+		log.Panicf("slice[%d,%d) out of bound [%d,%d)", lo, hi, fi, la)
+	}
 	return nil
 }
 
 // nextEnts returns all the committed but not applied entries
 func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 	// Your Code Here (2A).
+	off := max(l.applied+1, l.firstIndex())
+	if l.committed+1 > off {
+		ents, err := l.slice(off, l.committed+1)
+		if err != nil {
+			log.Panicf("unexpected error when getting unapplied entries (%v)", err)
+		}
+		return ents
+	}
 	return nil
 }
 
 // LastIndex return the last index of the log entries
 func (l *RaftLog) LastIndex() uint64 {
 	// Your Code Here (2A).
-	return 0
+	if i, ok := l.unstable.maybeLastIndex(); ok {
+		return i
+	}
+	index, err := l.storage.LastIndex()
+	if err != nil {
+		panic(err)
+	}
+	return index
+}
+
+func (l *RaftLog) firstIndex() uint64 {
+	if i, ok := l.unstable.maybeFirstIndex(); ok {
+		return i
+	}
+	i, err := l.storage.FirstIndex()
+	if err != nil {
+		panic(err)
+	}
+	return i
 }
 
 // Term return the term of the entry in the given index
 func (l *RaftLog) Term(i uint64) (uint64, error) {
 	// Your Code Here (2A).
-	return 0, nil
+	// the valid term range is [index of dummy entry, last index]
+	dummyIndex := l.firstIndex() - 1
+	if i < dummyIndex || i > l.LastIndex() {
+		return 0, nil
+	}
+
+	if t, ok := l.unstable.maybeTerm(i); ok {
+		return t, nil
+	}
+
+	t, err := l.storage.Term(i)
+	if err == nil {
+		return t, nil
+	}
+
+	if err == ErrCompacted || err == ErrUnavailable {
+		return 0, err
+	}
+	panic(err)
 }

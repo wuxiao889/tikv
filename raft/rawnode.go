@@ -70,12 +70,18 @@ type Ready struct {
 type RawNode struct {
 	Raft *Raft
 	// Your Data Here (2A).
+	prevhardStat *pb.HardState
+	prevSoftStat *SoftState
 }
 
 // NewRawNode returns a new RawNode given configuration and a list of raft peers.
 func NewRawNode(config *Config) (*RawNode, error) {
 	// Your Code Here (2A).
-	return nil, nil
+	rf := newRaft(config)
+	rn := &RawNode{Raft: rf}
+	rn.prevSoftStat = rf.softState()
+	rn.prevhardStat = rf.hardState()
+	return rn, nil
 }
 
 // Tick advances the internal logical clock by a single tick.
@@ -90,7 +96,8 @@ func (rn *RawNode) Campaign() error {
 	})
 }
 
-// Propose proposes data be appended to the raft log.
+// Propose proposes that data be appended to the log. Note that proposals can be lost without
+// notice, therefore it is user's job to ensure proposal retries.
 func (rn *RawNode) Propose(data []byte) error {
 	ent := pb.Entry{Data: data}
 	return rn.Raft.Step(pb.Message{
@@ -141,6 +148,8 @@ func (rn *RawNode) Step(m pb.Message) error {
 }
 
 // Ready returns the current point-in-time state of this RawNode.
+// NOTE: No committed entries from the next Ready may be applied until all committed entries
+// and snapshots from the previous one have finished.
 func (rn *RawNode) Ready() Ready {
 	// Your Code Here (2A).
 	return Ready{}
@@ -154,6 +163,12 @@ func (rn *RawNode) HasReady() bool {
 
 // Advance notifies the RawNode that the application has applied and saved progress in the
 // last Ready results.
+// The application should generally call Advance after it applies the entries in last Ready.
+//
+// However, as an optimization, the application may call Advance while it is applying the
+// commands. For example. when the last Ready contains a snapshot, the application might take
+// a long time to apply the snapshot data. To continue receiving Ready without blocking raft
+// progress, it can call Advance before finishing applying the last ready.
 func (rn *RawNode) Advance(rd Ready) {
 	// Your Code Here (2A).
 }
